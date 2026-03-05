@@ -68,22 +68,61 @@ def get_embed_token():
 @app.post("/chat-to-filter")
 def chat_to_filter(req: ChatRequest):
     system_prompt = """
-    You are an AI assistant controlling a Power BI dashboard. 
-    The dashboard has a table called 'Sales' with columns: 'Region', 'ProductCategory', and 'Status'.
-    Convert the user's natural language request into a valid Power BI Basic Filter JSON array.
-    
-    Power BI Basic Filter Schema:
-    [
+You are an AI assistant controlling a Power BI dashboard.
+
+The dashboard contains patent and exclusivity data.
+Main table: 'Orange Book patent'
+Available columns:
+- 'Appl_Type'
+- 'Appl_No'
+- 'Product_No'
+- 'Patent_No'
+- 'Patent_Expire_Date_Text' (Visual format is "14 March 2001", "24 August 2026")
+- 'Drug_Substance_Flag'
+- 'Drug_Product_Flag'
+- 'Patent_Use_Code'
+- 'Delist_Flag'
+- 'Submission_Date'
+
+Your job is to convert the user's natural language request into a valid Power BI Filter JSON array.
+
+You MUST use ONE of these two schemas depending on the request:
+
+1. Basic Filter (For exact matches, e.g., a specific Appl_Type or an exact date):
+[
+  {
+    "$schema": "http://powerbi.com/product/schema#basic",
+    "target": { "table": "Orange Book patent", "column": "ColumnName" },
+    "operator": "In",
+    "values": ["Value1"]
+  }
+]
+
+2. Advanced Filter (For date ranges, "before", "after", "till", or specific years):
+[
+  {
+    "$schema": "http://powerbi.com/product/schema#advanced",
+    "target": { "table": "Orange Book patent", "column": "ColumnName" },
+    "logicalOperator": "And",
+    "conditions": [
       {
-        "$schema": "http://powerbi.com/product/schema#basic",
-        "target": { "table": "TableName", "column": "ColumnName" },
-        "operator": "In",
-        "values": ["Value1", "Value2"]
+        "operator": "LessThanOrEqual",
+        "value": "2029-12-31T23:59:59.000Z"
       }
     ]
-    
-    Return ONLY valid JSON. Do not include markdown formatting or explanations.
-    """
+  }
+]
+Valid Advanced operators: "LessThan", "LessThanOrEqual", "GreaterThan", "GreaterThanOrEqual", "Contains", "StartsWith", "EndsWith".
+
+Rules for Dates ('Patent_Expire_Date_Text'):
+- If the user asks for an EXACT date (e.g., "on 14 March 2001"), use a Basic Filter and format the value exactly as "14 March 2001".
+- If the user asks for a range (e.g., "till 2029" or "before 2029"), use an Advanced Filter with operator "LessThanOrEqual". 
+- IMPORTANT: For Advanced Filter ranges, you MUST output the 'value' as a standard ISO date string (e.g., "2029-12-31T23:59:59.000Z"). Do not use the "14 March 2001" format for ranges.
+
+Rules:
+- Return ONLY a valid JSON array.
+- Do NOT include markdown formatting, comments, or explanations.
+"""
     
     try:
         response = client.chat.completions.create(
@@ -94,9 +133,23 @@ def chat_to_filter(req: ChatRequest):
             ],
             temperature=0
         )
-        filter_json = json.loads(response.choices[0].message.content)
+        
+        # 1. Get the raw text
+        raw_content = response.choices[0].message.content.strip()
+        
+        # 2. SAFETY CHECK: Strip markdown code blocks if the LLM added them
+        if raw_content.startswith("```json"):
+            raw_content = raw_content[7:-3].strip()
+        elif raw_content.startswith("```"):
+            raw_content = raw_content[3:-3].strip()
+            
+        print("AI Generated String:", raw_content)  # Debugging log
+        
+        # 3. Load the cleaned string into JSON
+        filter_json = json.loads(raw_content)
         return {"filters": filter_json}
+        
     except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="LLM did not return valid JSON")
+        raise HTTPException(status_code=500, detail=f"LLM did not return valid JSON. It returned: {raw_content}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
