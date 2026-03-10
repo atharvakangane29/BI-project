@@ -1,7 +1,7 @@
 {
-  "name": "frontend",
+  "name": "powerbi-agent-frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,9 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "powerbi-client": "^2.23.1",
     "axios": "^1.13.6",
-    "powerbi-client": "^2.23.9",
-    "powerbi-client-react": "^2.0.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

@@ -1,155 +1,181 @@
+import os
+import json
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import msal
-import requests
 from openai import OpenAI
-import json
-import os
 from dotenv import load_dotenv
+from typing import List, Optional
 
-# Load variables from the .env file
 load_dotenv()
 
 app = FastAPI()
 
-# --- CORS Configuration ---
-# This allows your Vite React app (running on port 5173) to talk to this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize OpenAI Client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI()
 
-# --- Power BI Configuration ---
-TENANT_ID = os.getenv("TENANT_ID")
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-WORKSPACE_ID = os.getenv("WORKSPACE_ID")
-REPORT_ID = os.getenv("REPORT_ID")
-AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
-SCOPE = ["https://analysis.windows.net/powerbi/api/.default"]
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID")
+AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET")
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID")
+POWERBI_WORKSPACE_ID = os.getenv("POWERBI_WORKSPACE_ID")
+POWERBI_REPORT_ID = os.getenv("POWERBI_REPORT_ID")
+POWERBI_DATASET_ID = os.getenv("POWERBI_DATASET_ID")
+POWERBI_API_URL = os.getenv("POWERBI_API_URL", "https://api.powerbi.com/v1.0/myorg")
+POWERBI_SCOPE = os.getenv("POWERBI_SCOPE", "https://analysis.windows.net/powerbi/api/.default")
 
-class ChatRequest(BaseModel):
-    message: str
+
+def get_powerbi_access_token():
+    url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+    payload = {
+        "grant_type": "client_credentials",
+        "client_id": AZURE_CLIENT_ID,
+        "client_secret": AZURE_CLIENT_SECRET,
+        "scope": POWERBI_SCOPE,
+    }
+    resp = requests.post(url, data=payload)
+    if not resp.ok:
+        raise Exception(f"Azure token error {resp.status_code}: {resp.text}")
+    return resp.json()["access_token"]
+
 
 @app.get("/get-embed-token")
 def get_embed_token():
-    msal_app = msal.ConfidentialClientApplication(
-        CLIENT_ID, authority=AUTHORITY, client_credential=CLIENT_SECRET
-    )
-    result = msal_app.acquire_token_for_client(scopes=SCOPE)
-    
-    if "access_token" not in result:
-        raise HTTPException(status_code=401, detail="Failed to authenticate with Power BI")
-    
-    access_token = result["access_token"]
-    
-    embed_url = f"https://api.powerbi.com/v1.0/myorg/groups/{WORKSPACE_ID}/reports/{REPORT_ID}/GenerateToken"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    payload = {"accessLevel": "View"}
-    
-    response = requests.post(embed_url, headers=headers, json=payload)
-    token_data = response.json()
-    
-    report_url = f"https://app.powerbi.com/reportEmbed?reportId={REPORT_ID}&groupId={WORKSPACE_ID}"
-    
-    return {
-        "embedToken": token_data.get("token"), 
-        "embedUrl": report_url, 
-        "reportId": REPORT_ID
-    }
+    try:
+        access_token = get_powerbi_access_token()
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
 
-@app.post("/chat-to-filter")
-def chat_to_filter(req: ChatRequest):
-    system_prompt = """
-You are an AI assistant controlling a Power BI dashboard.
+        # Generate embed token for report
+        url = f"{POWERBI_API_URL}/groups/{POWERBI_WORKSPACE_ID}/reports/{POWERBI_REPORT_ID}/GenerateToken"
+        payload = {"accessLevel": "view"}
+        resp = requests.post(url, headers=headers, json=payload)
+        if not resp.ok:
+            raise Exception(f"GenerateToken error {resp.status_code}: {resp.text}")
+        data = resp.json()
 
-The dashboard contains patent and exclusivity data.
-Main table: 'Orange Book patent'
-Available columns:
-- 'Appl_Type'
-- 'Appl_No'
-- 'Product_No'
-- 'Patent_No'
-- 'Patent_Expire_Date_Text' (Visual format is "14 March 2001", "24 August 2026")
-- 'Drug_Substance_Flag'
-- 'Drug_Product_Flag'
-- 'Patent_Use_Code'
-- 'Delist_Flag'
-- 'Submission_Date'
+        report_url = f"{POWERBI_API_URL}/groups/{POWERBI_WORKSPACE_ID}/reports/{POWERBI_REPORT_ID}"
+        report_resp = requests.get(report_url, headers=headers)
+        if not report_resp.ok:
+            raise Exception(f"GetReport error {report_resp.status_code}: {report_resp.text}")
+        report_data = report_resp.json()
 
-Your job is to convert the user's natural language request into a valid Power BI Filter JSON array.
+        return {
+            "token": data["token"],
+            "tokenId": data["tokenId"],
+            "expiration": data["expiration"],
+            "embedUrl": report_data["embedUrl"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get embed token: {str(e)}")
 
-You MUST use ONE of these two schemas depending on the request:
 
-1. Basic Filter (For exact matches, e.g., a specific Appl_Type or an exact date):
-[
-  {
-    "$schema": "http://powerbi.com/product/schema#basic",
-    "target": { "table": "Orange Book patent", "column": "ColumnName" },
-    "operator": "In",
-    "values": ["Value1"]
-  }
-]
+@app.get("/get-schema")
+def get_schema():
+    """Fetch dataset tables and columns from Power BI REST API."""
+    try:
+        access_token = get_powerbi_access_token()
+        headers = {"Authorization": f"Bearer {access_token}"}
 
-2. Advanced Filter (For date ranges, "before", "after", "till", or specific years):
-[
-  {
-    "$schema": "http://powerbi.com/product/schema#advanced",
-    "target": { "table": "Orange Book patent", "column": "ColumnName" },
-    "logicalOperator": "And",
-    "conditions": [
-      {
-        "operator": "LessThanOrEqual",
-        "value": "2029-12-31T23:59:59.000Z"
-      }
-    ]
-  }
-]
-Valid Advanced operators: "LessThan", "LessThanOrEqual", "GreaterThan", "GreaterThanOrEqual", "Contains", "StartsWith", "EndsWith".
+        tables_url = f"{POWERBI_API_URL}/groups/{POWERBI_WORKSPACE_ID}/datasets/{POWERBI_DATASET_ID}/tables"
+        resp = requests.get(tables_url, headers=headers)
+        if not resp.ok:
+            raise Exception(f"GetTables error {resp.status_code}: {resp.text}")
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch schema: {str(e)}")
 
-Rules for Dates ('Patent_Expire_Date_Text'):
-- If the user asks for an EXACT date (e.g., "on 14 March 2001"), use a Basic Filter and format the value exactly as "14 March 2001".
-- If the user asks for a range (e.g., "till 2029" or "before 2029"), use an Advanced Filter with operator "LessThanOrEqual". 
-- IMPORTANT: For Advanced Filter ranges, you MUST output the 'value' as a standard ISO date string (e.g., "2029-12-31T23:59:59.000Z"). Do not use the "14 March 2001" format for ranges.
 
-Rules:
-- Return ONLY a valid JSON array.
-- Do NOT include markdown formatting, comments, or explanations.
+class DaxRequest(BaseModel):
+    query: str
+
+
+@app.post("/execute-dax")
+def execute_dax(req: DaxRequest):
+    """Execute a DAX query against the Power BI dataset."""
+    try:
+        access_token = get_powerbi_access_token()
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+        url = f"{POWERBI_API_URL}/groups/{POWERBI_WORKSPACE_ID}/datasets/{POWERBI_DATASET_ID}/executeQueries"
+        payload = {"queries": [{"query": req.query}], "serializerSettings": {"includeNulls": True}}
+
+        resp = requests.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DAX query failed: {str(e)}")
+
+
+class ChatRequest(BaseModel):
+    message: str
+    schema_tables: Optional[List[dict]] = []
+    dax_result: Optional[str] = None
+
+
+@app.post("/chat")
+def chat_agent(req: ChatRequest):
+    schema_string = json.dumps(req.schema_tables, indent=2) if req.schema_tables else "Unknown"
+
+    system_prompt = f"""
+You are an AI data assistant controlling a Power BI dashboard.
+
+You have access to the following dataset schema (tables, columns, measures):
+{schema_string}
+
+Your task is to analyze the user's request and respond in EXACTLY this JSON format:
+{{
+  "status": "success" | "error",
+  "query_type": "filtered_query" | "data_query" | "unsupported",
+  "message": "Error message if status is error",
+  "filters": [
+    {{ "table": "TableName", "column": "ColumnName", "operator": "In", "values": ["Value1"] }}
+  ],
+  "dax_query": "EVALUATE ... (only if data needs to be fetched)",
+  "needs_dax": true | false,
+  "insight": "Conversational answer to the user's question"
+}}
+
+RULES:
+1. ONLY use tables and columns that exist in the schema above. NEVER invent fields.
+2. If the user asks for something that cannot be answered from the schema, set status="error" and query_type="unsupported".
+3. If the user implies a filter (e.g., "in 2024", "for Facility A"), populate the "filters" array with Power BI compatible filter objects.
+4. If the user asks a data question (e.g., "which facility has highest encounters?"), set "needs_dax": true and write the DAX query.
+5. If dax_result data is provided, use it to generate a clear "insight". Do NOT set needs_dax again.
+6. For filter-only queries (e.g., "show data for 2024"), set needs_dax=false and provide a brief insight like "Filters applied for 2024."
+7. Operator options: "In", "LessThan", "LessThanOrEqual", "GreaterThan", "GreaterThanOrEqual", "Contains", "StartsWith"
 """
-    
+
+    user_content = req.message
+    if req.dax_result:
+        user_content += f"\n\nHere is the DAX query result to answer the question:\n{req.dax_result}"
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.message}
+                {"role": "user", "content": user_content},
             ],
-            temperature=0
+            temperature=0,
         )
-        
-        # 1. Get the raw text
+
         raw_content = response.choices[0].message.content.strip()
-        
-        # 2. SAFETY CHECK: Strip markdown code blocks if the LLM added them
         if raw_content.startswith("```json"):
             raw_content = raw_content[7:-3].strip()
         elif raw_content.startswith("```"):
             raw_content = raw_content[3:-3].strip()
-            
-        print("AI Generated String:", raw_content)  # Debugging log
-        
-        # 3. Load the cleaned string into JSON
-        filter_json = json.loads(raw_content)
-        return {"filters": filter_json}
-        
+
+        print("AI Output:", raw_content)
+        return json.loads(raw_content)
+
     except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail=f"LLM did not return valid JSON. It returned: {raw_content}")
+        raise HTTPException(status_code=500, detail="LLM did not return valid JSON.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

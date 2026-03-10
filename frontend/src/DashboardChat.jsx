@@ -1,130 +1,523 @@
-import React, { useState, useEffect } from 'react';
-import { PowerBIEmbed } from 'powerbi-client-react';
-import { models } from 'powerbi-client';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import * as pbi from 'powerbi-client';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL;
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
+const REPORT_ID = import.meta.env.VITE_POWERBI_REPORT_ID;
 
-function DashboardChat() {
-  const [embedConfig, setEmbedConfig] = useState(null);
-  const [reportObj, setReportObj] = useState(null);
-  const [chatInput, setChatInput] = useState("");
+// ── Inline styles (no Tailwind needed) ──────────────────────────────────────
+
+const S = {
+  root: {
+    display: 'flex', height: '100vh', overflow: 'hidden',
+    fontFamily: 'var(--font-sans)', background: 'var(--bg)',
+  },
+  // Dashboard panel
+  dashPanel: {
+    flex: '1 1 0', display: 'flex', flexDirection: 'column',
+    borderRight: '1px solid var(--border)',
+  },
+  dashHeader: {
+    display: 'flex', alignItems: 'center', gap: '12px',
+    padding: '14px 20px', borderBottom: '1px solid var(--border)',
+    background: 'var(--surface)',
+  },
+  logo: {
+    width: 28, height: 28,
+  },
+  dashTitle: {
+    fontSize: '13px', fontWeight: 600, letterSpacing: '0.04em',
+    color: 'var(--text)', textTransform: 'uppercase',
+  },
+  statusDot: (ok) => ({
+    width: 7, height: 7, borderRadius: '50%', marginLeft: 'auto',
+    background: ok ? 'var(--success)' : 'var(--text-muted)',
+    boxShadow: ok ? '0 0 6px var(--success)' : 'none',
+    transition: 'all 0.3s',
+  }),
+  statusLabel: {
+    fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+  },
+  embedContainer: {
+    flex: 1, position: 'relative', background: '#0f1420',
+  },
+  embedFrame: {
+    width: '100%', height: '100%', border: 'none',
+  },
+  embedPlaceholder: {
+    position: 'absolute', inset: 0, display: 'flex',
+    flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    gap: '16px', color: 'var(--text-muted)',
+  },
+  placeholderIcon: { fontSize: '40px', opacity: 0.3 },
+  placeholderText: { fontSize: '13px', fontFamily: 'var(--font-mono)' },
+
+  // Filter chips
+  filterBar: {
+    display: 'flex', flexWrap: 'wrap', gap: '6px',
+    padding: '10px 16px', borderTop: '1px solid var(--border)',
+    background: 'var(--surface)', minHeight: '44px', alignItems: 'center',
+  },
+  filterLabel: {
+    fontSize: '10px', fontFamily: 'var(--font-mono)',
+    color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase',
+    marginRight: '4px',
+  },
+  chip: {
+    display: 'flex', alignItems: 'center', gap: '5px',
+    background: 'var(--accent-dim)', border: '1px solid var(--accent)',
+    borderRadius: '4px', padding: '3px 8px',
+    fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--accent-glow)',
+  },
+  chipRemove: {
+    cursor: 'pointer', opacity: 0.6, fontSize: '12px', lineHeight: 1,
+    background: 'none', border: 'none', color: 'var(--accent-glow)',
+    padding: '0 0 0 2px',
+  },
+
+  // Chat panel
+  chatPanel: {
+    width: '380px', flexShrink: 0, display: 'flex', flexDirection: 'column',
+    background: 'var(--surface)', position: 'relative',
+  },
+  chatHeader: {
+    padding: '14px 20px', borderBottom: '1px solid var(--border)',
+    display: 'flex', flexDirection: 'column', gap: '2px',
+  },
+  chatTitle: {
+    fontSize: '13px', fontWeight: 700, letterSpacing: '0.06em',
+    color: 'var(--text)', textTransform: 'uppercase',
+  },
+  chatSubtitle: {
+    fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+  },
+  messages: {
+    flex: 1, overflowY: 'auto', padding: '16px', display: 'flex',
+    flexDirection: 'column', gap: '12px',
+  },
+  msg: (role) => ({
+    display: 'flex', flexDirection: 'column',
+    alignItems: role === 'user' ? 'flex-end' : 'flex-start',
+    gap: '3px',
+  }),
+  msgLabel: (role) => ({
+    fontSize: '9px', fontFamily: 'var(--font-mono)', letterSpacing: '0.1em',
+    textTransform: 'uppercase',
+    color: role === 'user' ? 'var(--accent-glow)' : 'var(--text-muted)',
+  }),
+  bubble: (role) => ({
+    maxWidth: '88%', padding: '10px 13px', borderRadius: '8px',
+    fontSize: '13px', lineHeight: '1.6', wordBreak: 'break-word',
+    whiteSpace: 'pre-wrap',
+    background: role === 'user'
+      ? 'var(--accent)'
+      : 'var(--surface2)',
+    color: role === 'user' ? '#fff' : 'var(--text)',
+    border: role === 'user' ? 'none' : '1px solid var(--border)',
+  }),
+  insightBubble: {
+    maxWidth: '88%', padding: '10px 13px', borderRadius: '8px',
+    fontSize: '13px', lineHeight: '1.6', wordBreak: 'break-word',
+    whiteSpace: 'pre-wrap',
+    background: 'rgba(16,185,129,0.08)',
+    color: 'var(--success)',
+    border: '1px solid rgba(16,185,129,0.25)',
+  },
+  errorBubble: {
+    maxWidth: '88%', padding: '10px 13px', borderRadius: '8px',
+    fontSize: '13px', lineHeight: '1.6',
+    background: 'rgba(239,68,68,0.08)',
+    color: 'var(--error)',
+    border: '1px solid rgba(239,68,68,0.25)',
+  },
+  daxBlock: {
+    fontFamily: 'var(--font-mono)', fontSize: '10px',
+    background: '#0a0d14', border: '1px solid var(--border)',
+    borderRadius: '4px', padding: '8px 10px',
+    color: '#7dd3fc', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+    marginTop: '6px', maxWidth: '88%',
+  },
+  thinkingDots: {
+    display: 'flex', gap: '5px', padding: '12px 14px',
+    background: 'var(--surface2)', border: '1px solid var(--border)',
+    borderRadius: '8px', alignSelf: 'flex-start',
+  },
+  dot: (i) => ({
+    width: 6, height: 6, borderRadius: '50%', background: 'var(--text-muted)',
+    animation: `pulse 1.2s ease-in-out ${i * 0.2}s infinite`,
+  }),
+  // Input
+  inputArea: {
+    padding: '14px 16px', borderTop: '1px solid var(--border)',
+    display: 'flex', gap: '8px', alignItems: 'flex-end',
+    background: 'var(--surface)',
+  },
+  textarea: {
+    flex: 1, background: 'var(--surface2)', border: '1px solid var(--border)',
+    borderRadius: '8px', padding: '10px 12px', color: 'var(--text)',
+    fontSize: '13px', fontFamily: 'var(--font-sans)', resize: 'none',
+    outline: 'none', lineHeight: '1.5', maxHeight: '100px',
+    transition: 'border-color 0.2s',
+  },
+  sendBtn: (disabled) => ({
+    padding: '10px 16px', borderRadius: '8px', border: 'none',
+    background: disabled ? 'var(--border)' : 'var(--accent)',
+    color: disabled ? 'var(--text-muted)' : '#fff',
+    fontSize: '13px', fontWeight: 600, cursor: disabled ? 'not-allowed' : 'pointer',
+    transition: 'all 0.2s', flexShrink: 0, fontFamily: 'var(--font-sans)',
+    letterSpacing: '0.02em',
+  }),
+  // Schema badge
+  schemaBadge: {
+    position: 'absolute', bottom: '80px', right: '16px',
+    background: 'var(--surface2)', border: '1px solid var(--border)',
+    borderRadius: '6px', padding: '6px 10px',
+    fontSize: '10px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+    pointerEvents: 'none',
+  },
+};
+
+// CSS keyframes injected once
+const injectKeyframes = () => {
+  if (document.getElementById('pbi-agent-kf')) return;
+  const style = document.createElement('style');
+  style.id = 'pbi-agent-kf';
+  style.textContent = `
+    @keyframes pulse {
+      0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
+      40% { opacity: 1; transform: scale(1); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .pbi-msg { animation: fadeIn 0.25s ease forwards; }
+    textarea:focus { border-color: var(--accent) !important; }
+  `;
+  document.head.appendChild(style);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function DashboardChat() {
+  const [messages, setMessages] = useState([
+    { role: 'ai', content: 'Connected to Power BI Agent. Ask me to filter the dashboard, run queries, or surface insights from your data.' },
+  ]);
+  const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [embedReady, setEmbedReady] = useState(false);
+  const [schema, setSchema] = useState([]);
+  const [activeFilters, setActiveFilters] = useState([]);
+
+  const embedContainerRef = useRef(null);
+  const reportRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const pbiServiceRef = useRef(null);
 
   useEffect(() => {
-    // 1. Paste the values you got from the Power BI website here:
-    const myReportId = "PASTE_REPORT_ID_HERE";
-    const myEmbedUrl = "https://app.powerbi.com/reportEmbed?reportId=PASTE_REPORT_ID_HERE"; 
-    const myAadToken = "PASTE_COPIED_TOKEN_HERE";
-
-    // 2. Set the config directly, skipping the backend axios.get call
-    setEmbedConfig({
-      type: 'report',
-      id: "2344aa65-8129-4fb4-ba09-66ebcb2823dc",
-      embedUrl: "https://app.powerbi.com/reportEmbed?reportId=2344aa65-8129-4fb4-ba09-66ebcb2823dc&config=eyJjbHVzdGVyVXJsIjoiaHR0cHM6Ly9XQUJJLUlORElBLUNFTlRSQUwtQS1QUklNQVJZLXJlZGlyZWN0LmFuYWx5c2lzLndpbmRvd3MubmV0IiwiZW1iZWRGZWF0dXJlcyI6eyJ1c2FnZU1ldHJpY3NWTmV4dCI6dHJ1ZX19",
-      accessToken: "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsIng1dCI6InNNMV95QXhWOEdWNHlOLUI2ajJ4em1pazVBbyIsImtpZCI6InNNMV95QXhWOEdWNHlOLUI2ajJ4em1pazVBbyJ9.eyJhdWQiOiJodHRwczovL2FuYWx5c2lzLndpbmRvd3MubmV0L3Bvd2VyYmkvYXBpIiwiaXNzIjoiaHR0cHM6Ly9zdHMud2luZG93cy5uZXQvOTA5MDQxODctYTg3Yy00NmEwLThhNjAtMThjM2JlNzE5MTVkLyIsImlhdCI6MTc3MjQ3NTU1OCwibmJmIjoxNzcyNDc1NTU4LCJleHAiOjE3NzI0ODEyNTMsImFjY3QiOjAsImFjciI6IjEiLCJhaW8iOiJBWFFBaS84YkFBQUFGcG5VODVhYm5sZ0FxNjdUWlFqR1ZZZWVZNUl6Mnp2S21Gb2pCSEFzZThWVkJ1RnFOdk1lR0pkU01vUzMyK28yWmMyZ041Yk9TcExCa3pPTXV0cXBESzl6WEdkbm41WU1zcXBtckJUY3hyVk01eGJOemhxaE5heEd4NXJOU1pzSFFGenRZZzBuQ0dLb1hDS3d4RmtyTWc9PSIsImFtciI6WyJwd2QiLCJtZmEiXSwiYXBwaWQiOiI4NzFjMDEwZi01ZTYxLTRmYjEtODNhYy05ODYxMGE3ZTkxMTAiLCJhcHBpZGFjciI6IjAiLCJmYW1pbHlfbmFtZSI6IkthbmdhbmUiLCJnaXZlbl9uYW1lIjoiQXRoYXJ2YSIsImlkdHlwIjoidXNlciIsImlwYWRkciI6IjEyMi4xNjcuMTE0LjExOCIsIm5hbWUiOiJBdGhhcnZhIEpheWFudCBLYW5nYW5lIiwib2lkIjoiZDNjYzViNTItZjhiNy00MThmLThmN2EtNmNjZTY3OGQ3NmZjIiwicHVpZCI6IjEwMDMyMDA1NUFFMDQzQTMiLCJyaCI6IjEuQVQ0QWgwR1FrSHlvb0VhS1lCakR2bkdSWFFrQUFBQUFBQUFBd0FBQUFBQUFBQUFBQU9zLUFBLiIsInNjcCI6InVzZXJfaW1wZXJzb25hdGlvbiIsInNpZCI6IjAwMmUxY2NhLTY5ODAtNDcxOS02M2FjLTlmYjU2NmRlOTNkZiIsInN1YiI6IlJ6bm1QUVFpUnR0N1lsSzNVRDVhWkc0akR3WVg0TWp3Q0o3UDkzbUdDUlUiLCJ0aWQiOiI5MDkwNDE4Ny1hODdjLTQ2YTAtOGE2MC0xOGMzYmU3MTkxNWQiLCJ1bmlxdWVfbmFtZSI6IkF0aGFydmFLQGNpcmN1bGFudHMuY29tIiwidXBuIjoiQXRoYXJ2YUtAY2lyY3VsYW50cy5jb20iLCJ1dGkiOiJtY2VPUXkyWF9reXRyaXlWQXJkb0FBIiwidmVyIjoiMS4wIiwid2lkcyI6WyJiNzlmYmY0ZC0zZWY5LTQ2ODktODE0My03NmIxOTRlODU1MDkiXSwieG1zX2FjdF9mY3QiOiIzIDUiLCJ4bXNfZnRkIjoibjhMTk9LMTBNRUd0Y3FzMjB3UGx4ak15S3ZZV0hFYzRUWmR0NXVkaEt0Y0JhbUZ3WVc1bFlYTjBMV1J6YlhNIiwieG1zX2lkcmVsIjoiMSAxMiIsInhtc19zdWJfZmN0IjoiMyA4In0.VZTh-xxfZb-US0PoFvahavEIoGyravewoD4L3r1tpa0ljAnrDktMHLseIw_dUuBRn4V1qjppCn5zUbMhgXy2MMdleBAu7D-9gmGGvAcLjfiEvkSzOfAyTK-VNZpfnqWQEO9JRmkixFhInWgr0X1AWpaI-gB9sS9wrxmNBApQTlb6XmRYMyr4Hnssf58JBwxU2e-xTekVx1ufstUKXC0QMxWiNj5-T4aN1Q0sikduvV9Ohsddzx2_5xo9tOIvIgR6Cwec-JoKqQ0nh69xz8Q8yDvayOhQlxBbKxt-k5CxW3_5k9o8nQZVaXT1_-h_TvhGGEdGHxcyHl5IDtZMWwfHrw",
-      pageName: "c6399044ab3e2550fc73",
-      tokenType: models.TokenType.Aad, // IMPORTANT: This must be Aad, not Embed
-      settings: {
-        panes: { filters: { expanded: false, visible: false } },
-        navContentPaneEnabled: false,
-      }
-    });
+    injectKeyframes();
+    initPowerBI();
+    fetchSchema();
   }, []);
 
-  const handleChatSubmit = async (e) => {
-    e.preventDefault();
-    if (!reportObj || !chatInput.trim()) return;
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
-    setIsLoading(true);
+  // ── Power BI Embed ─────────────────────────────────────────────────────────
+
+  const initPowerBI = async () => {
     try {
-      const response = await axios.post(`${BACKEND_URL}/chat-to-filter`, {
-        message: chatInput
-      });
-      
-      const newFilters = response.data.filters;
-      
-      // 1. Get the current active page
-      const pages = await reportObj.getPages();
-      const activePage = pages.find(p => p.isActive);
-      
-      // 2. Get all visuals on that page
-      const visuals = await activePage.getVisuals();
-      
-      // 3. Find only the visuals that are "slicers" (sliders/dropdowns)
-      const slicers = visuals.filter(v => v.type === 'slicer');
-      
-      if (slicers.length > 0) {
-        // 4. Inject the AI's filter directly into the physical Slicer state
-        for (let slicer of slicers) {
-          try {
-            await slicer.setSlicerState({ filters: newFilters });
-          } catch (err) {
-            console.log("Could not update a specific slicer", err);
-          }
-        }
-      } else {
-        // Fallback: If no physical slicer is on the screen, apply as a background filter
-        await reportObj.setFilters(newFilters);
-      }
-      
-      setChatInput("");
-      
-    } catch (error) {
-      console.error("Failed to apply filters:", error);
-      alert("Could not process the filter request.");
-    } finally {
-      setIsLoading(false);
+      const res = await axios.get(`${BACKEND_URL}/get-embed-token`);
+      const { token, embedUrl } = res.data;
+
+      const service = new pbi.service.Service(
+        pbi.factories.hpmFactory,
+        pbi.factories.wpmpFactory,
+        pbi.factories.routerFactory
+      );
+      pbiServiceRef.current = service;
+
+      const config = {
+        type: 'report',
+        id: REPORT_ID,
+        embedUrl,
+        accessToken: token,
+        tokenType: pbi.models.TokenType.Embed,
+        settings: {
+          panes: { filters: { visible: false }, pageNavigation: { visible: true } },
+          background: pbi.models.BackgroundType.Transparent,
+        },
+      };
+
+      const report = service.embed(embedContainerRef.current, config);
+      reportRef.current = report;
+
+      report.on('loaded', () => setEmbedReady(true));
+      report.on('error', (e) => console.error('PBI embed error:', e));
+    } catch (err) {
+      console.error('Failed to initialise Power BI embed:', err);
+      addMsg('ai', '⚠️ Could not connect to Power BI. Check your credentials in .env.');
     }
   };
 
-  if (!embedConfig) return <div style={{ padding: '20px' }}>Loading dashboard configuration...</div>;
+  // ── Schema ─────────────────────────────────────────────────────────────────
+
+  const fetchSchema = async () => {
+    try {
+      const res = await axios.get(`${BACKEND_URL}/get-schema`);
+      setSchema(res.data?.value || []);
+    } catch {
+      // schema fetch is best-effort; the LLM will still work with whatever it gets
+    }
+  };
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  const addMsg = (role, content, extra = {}) =>
+    setMessages(prev => [...prev, { role, content, ...extra }]);
+
+  const applyFiltersToReport = async (filters) => {
+    if (!reportRef.current || !filters?.length) return;
+    try {
+      const pbiFilters = filters.map(f => ({
+        $schema: 'http://powerbi.com/product/schema#basic',
+        target: { table: f.table, column: f.column },
+        operator: f.operator || 'In',
+        values: f.values,
+        filterType: pbi.models.FilterType.Basic,
+      }));
+      await reportRef.current.updateFilters(pbi.models.FiltersOperations.Add, pbiFilters);
+      setActiveFilters(prev => [...prev, ...filters]);
+    } catch (err) {
+      console.error('Filter apply error:', err);
+    }
+  };
+
+  const removeFilter = async (index) => {
+    const updated = activeFilters.filter((_, i) => i !== index);
+    setActiveFilters(updated);
+    if (!reportRef.current) return;
+    try {
+      if (updated.length === 0) {
+        await reportRef.current.removeFilters();
+      } else {
+        const pbiFilters = updated.map(f => ({
+          $schema: 'http://powerbi.com/product/schema#basic',
+          target: { table: f.table, column: f.column },
+          operator: f.operator || 'In',
+          values: f.values,
+          filterType: pbi.models.FilterType.Basic,
+        }));
+        await reportRef.current.updateFilters(pbi.models.FiltersOperations.Replace, pbiFilters);
+      }
+    } catch (err) {
+      console.error('Filter remove error:', err);
+    }
+  };
+
+  const executeDax = async (daxQuery) => {
+    try {
+      const res = await axios.post(`${BACKEND_URL}/execute-dax`, { query: daxQuery });
+      const rows = res.data?.results?.[0]?.tables?.[0]?.rows;
+      if (!rows?.length) return null;
+      return JSON.stringify(rows.slice(0, 30), null, 2);
+    } catch (err) {
+      console.error('DAX error:', err);
+      return null;
+    }
+  };
+
+  // ── Chat Submit ────────────────────────────────────────────────────────────
+
+  const handleSubmit = useCallback(async () => {
+    const msg = input.trim();
+    if (!msg || isLoading) return;
+
+    addMsg('user', msg);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      // Turn 1 – ask AI what to do
+      const res1 = await axios.post(`${BACKEND_URL}/chat`, {
+        message: msg,
+        schema_tables: schema,
+      });
+      const ai1 = res1.data;
+
+      // Unsupported
+      if (ai1.status === 'error' || ai1.query_type === 'unsupported') {
+        addMsg('ai', ai1.message || 'The dataset cannot answer this query.', { isError: true });
+        setIsLoading(false);
+        return;
+      }
+
+      // Apply filters (always, even if needs_dax)
+      if (ai1.filters?.length) {
+        await applyFiltersToReport(ai1.filters);
+      }
+
+      // If just a filter query with insight already
+      if (!ai1.needs_dax && ai1.insight) {
+        addMsg('ai', ai1.insight, { isInsight: true, filters: ai1.filters });
+        setIsLoading(false);
+        return;
+      }
+
+      // If just a filter query with no insight
+      if (!ai1.needs_dax && !ai1.insight) {
+        addMsg('ai', ai1.filters?.length ? 'Filters applied to the dashboard.' : 'Done.');
+        setIsLoading(false);
+        return;
+      }
+
+      // Needs DAX – run query then Turn 2
+      if (ai1.needs_dax && ai1.dax_query) {
+        addMsg('ai', '⏳ Running DAX query against the dataset…');
+        const daxResult = await executeDax(ai1.dax_query);
+
+        const res2 = await axios.post(`${BACKEND_URL}/chat`, {
+          message: msg,
+          schema_tables: schema,
+          dax_result: daxResult || 'No data returned.',
+        });
+        const ai2 = res2.data;
+
+        if (ai2.insight) {
+          addMsg('ai', ai2.insight, { isInsight: true, dax: ai1.dax_query });
+        } else {
+          addMsg('ai', 'Query ran but no insight was generated.', { dax: ai1.dax_query });
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      addMsg('ai', 'An error occurred while processing your request.', { isError: true });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [input, isLoading, schema, activeFilters]);
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
+
+  // ── Schema summary for badge ───────────────────────────────────────────────
+  const schemaInfo = schema.length
+    ? `${schema.length} table${schema.length !== 1 ? 's' : ''} · ${schema.reduce((a, t) => a + (t.columns?.length || 0), 0)} columns`
+    : 'schema loading…';
+
+  // ─────────────────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ display: 'flex', height: '100vh', fontFamily: 'sans-serif' }}>
-      
-      {/* Power BI Embed Section */}
-      <div style={{ flex: 3, backgroundColor: '#f3f2f1' }}>
-        <PowerBIEmbed
-          embedConfig={embedConfig}
-          cssClassName="powerbi-frame"
-          getEmbeddedComponent={(embeddedReport) => {
-            setReportObj(embeddedReport);
-          }}
-        />
-      </div>
-
-      {/* Chat Interface Section */}
-      <div style={{ flex: 1, padding: '20px', borderLeft: '1px solid #ccc', display: 'flex', flexDirection: 'column' }}>
-        <h2 style={{ margin: '0 0 20px 0' }}>Data Copilot</h2>
-        
-        <div style={{ flex: 1, overflowY: 'auto', marginBottom: '20px', padding: '10px', backgroundColor: '#fafafa', border: '1px solid #eee', borderRadius: '4px' }}>
-            <p style={{ color: '#666', fontSize: '14px' }}>
-              Ask a question to filter the dashboard. Try: <em>"Show me the West region"</em>
-            </p>
+    <div style={S.root}>
+      {/* ── Dashboard panel ── */}
+      <div style={S.dashPanel}>
+        <div style={S.dashHeader}>
+          {/* Power BI logo SVG */}
+          <svg style={S.logo} viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="6" fill="#F2C811"/>
+            <rect x="6" y="18" width="4" height="8" rx="1" fill="#1E1E1E"/>
+            <rect x="14" y="12" width="4" height="14" rx="1" fill="#1E1E1E"/>
+            <rect x="22" y="6" width="4" height="20" rx="1" fill="#1E1E1E"/>
+          </svg>
+          <span style={S.dashTitle}>Power BI · Dashboard</span>
+          <span style={S.statusLabel}>{embedReady ? 'connected' : 'connecting…'}</span>
+          <span style={S.statusDot(embedReady)} />
         </div>
 
-        <form onSubmit={handleChatSubmit} style={{ display: 'flex', flexDirection: 'column' }}>
-          <input 
-            type="text" 
-            value={chatInput} 
-            onChange={(e) => setChatInput(e.target.value)} 
-            placeholder="Type your filter request..."
-            style={{ padding: '12px', borderRadius: '4px', border: '1px solid #ccc', marginBottom: '10px' }}
-            disabled={isLoading}
-          />
-          <button 
-            type="submit" 
-            disabled={isLoading}
-            style={{ padding: '12px', backgroundColor: '#0078d4', color: 'white', border: 'none', borderRadius: '4px', cursor: isLoading ? 'not-allowed' : 'pointer' }}
-          >
-             {isLoading ? 'Applying...' : 'Filter Dashboard'}
-          </button>
-        </form>
+        <div style={S.embedContainer}>
+          <div ref={embedContainerRef} style={{ width: '100%', height: '100%' }} />
+          {!embedReady && (
+            <div style={S.embedPlaceholder}>
+              <span style={S.placeholderIcon}>📊</span>
+              <span style={S.placeholderText}>Connecting to Power BI…</span>
+            </div>
+          )}
+        </div>
+
+        {/* Active filter chips */}
+        <div style={S.filterBar}>
+          {activeFilters.length === 0 ? (
+            <span style={S.filterLabel}>No active filters</span>
+          ) : (
+            <>
+              <span style={S.filterLabel}>Filters</span>
+              {activeFilters.map((f, i) => (
+                <span key={i} style={S.chip}>
+                  <span>{f.table}[{f.column}]: {f.values.join(', ')}</span>
+                  <button style={S.chipRemove} onClick={() => removeFilter(i)}>✕</button>
+                </span>
+              ))}
+            </>
+          )}
+        </div>
       </div>
 
+      {/* ── Chat panel ── */}
+      <div style={S.chatPanel}>
+        <div style={S.chatHeader}>
+          <span style={S.chatTitle}>BI Agent</span>
+          <span style={S.chatSubtitle}>Powered by GPT-4o · Power BI REST API</span>
+        </div>
+
+        <div style={S.messages}>
+          {messages.map((m, i) => (
+            <div key={i} className="pbi-msg" style={S.msg(m.role)}>
+              <span style={S.msgLabel(m.role)}>{m.role === 'user' ? 'You' : 'Agent'}</span>
+              <div style={
+                m.isError ? S.errorBubble
+                : m.isInsight ? S.insightBubble
+                : S.bubble(m.role)
+              }>
+                {m.content}
+              </div>
+              {m.dax && (
+                <div style={S.daxBlock}>{m.dax}</div>
+              )}
+              {m.filters?.length > 0 && (
+                <div style={{ ...S.daxBlock, color: '#86efac', marginTop: 4 }}>
+                  {m.filters.map((f, fi) =>
+                    `${f.table}[${f.column}] IN [${f.values.join(', ')}]`
+                  ).join('\n')}
+                </div>
+              )}
+            </div>
+          ))}
+
+          {isLoading && (
+            <div style={S.thinkingDots}>
+              {[0,1,2].map(i => <span key={i} style={S.dot(i)} />)}
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Schema badge */}
+        <div style={S.schemaBadge}>{schemaInfo}</div>
+
+        <div style={S.inputArea}>
+          <textarea
+            rows={2}
+            style={S.textarea}
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Filter by year, ask for top insights…"
+            disabled={isLoading}
+          />
+          <button
+            style={S.sendBtn(isLoading || !input.trim())}
+            onClick={handleSubmit}
+            disabled={isLoading || !input.trim()}
+          >
+            Send
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
-
-export default DashboardChat;
